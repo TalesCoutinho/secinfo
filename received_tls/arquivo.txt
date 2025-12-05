@@ -1,0 +1,16 @@
+ICP473-Segurança da Informação
+Fundamentos e princípios de segurança em sistemas computacionais; Leis, normas, políticas e padrões de segurança da informação; Elementos do processo de segurança da informação; Segurança em redes e em infraestrutura; Tipos de ataque; Ferramentas e políticas de segurança em redes; Segurança na Web; Segurança de software; Técnicas básicas e modernas de encriptação; Assinatura e certificado digital; Segurança de dados e criptografia; Segurança da informação e sociedade.
+
+___BIBLIOGRAFIA BÁSICA___
+1) R. Anderson, Security Engineering, 3 ed., J. Willey, 2020.
+2) W. Stallings, Criptografia e Segurança de Redes: Princípios e Práticas, 6ª ed, Pearson Prentice-Hall, 2014.
+
+___BIBLIOGRAFIA COMPLEMENTAR___
+1) W. Stallings, Operating Systems: design and principles, Prentice-Hall, 2014 (Cap 15: Operating System Security).
+2) S. Garfinkel e G. Spafford, Practical Unix and Internet Security, 2 ed, O?Reilly & Associates, 1996.
+3) E. Zwicky, S. Cooper e B. Chapman, Building Internet Firewalls, 2 ed, O'Reilly & Associates, 2000.
+
+___BIBLIOGRAFIA COMPLEMENTAR - CRIPTOGRAFIA___
+1) B. Schneier, Segurança com segredos e mentiras sobre a proteção na vida digital, Campus, 2001.
+2) A. Menezes et al. Handbook of applied cryptography, CRC Press Series on Discrete Mathematics, 1996.
+3) B. Schneier, Applied Cryptography: Protocols, Algorithms and Source Code in C, John Wiley & Sons, 2007.
