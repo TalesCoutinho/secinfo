@@ -1,180 +1,233 @@
 #!/usr/bin/env python3
 import json
-import pandas as pd
+import csv
+from pathlib import Path
+from typing import Any, Dict, List
 
-# Mapeamento numérico → nome do registro TLS
-TLS_TYPE = {
-    "20": "Change Cipher Spec",
-    "21": "Alert",
-    "22": "Handshake",
-    "23": "Application Data",
-}
-
-HANDSHAKE_TYPE = {
-    "1": "ClientHello",
-    "2": "ServerHello",
-    "11": "Certificate",
-    "12": "ServerKeyExchange",
-    "14": "ServerHelloDone",
-    "16": "ClientKeyExchange",
-    "20": "Finished",
-}
+CAPTURA_FILE = "captura_tls.json"
+TLS_RECORDS_CSV = "tls_records_parsed.csv"
+TLS_FRAMES_CSV = "tls_frames_parsed.csv"
 
 
-def get_first(val):
+def load_packets(path: Path) -> List[Dict[str, Any]]:
+    """Carrega o JSON exportado pelo tshark (-T json)."""
+    if not path.exists():
+        raise FileNotFoundError(f"Arquivo {path} não encontrado. Rode antes o tshark para gerar o JSON.")
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError("Formato inesperado de JSON: esperado uma lista de pacotes.")
+    return data
+
+
+def normalize_tls_records(tls_layer: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    No JSON do tshark, alguns campos vêm como lista, outros como string.
-    Essa função normaliza:
-      - se for lista → pega o primeiro elemento
-      - caso contrário → devolve como está
+    Normaliza o campo 'tls.record' para sempre retornar uma lista de records.
+    No JSON do tshark, pode vir como dict (um só record) ou como lista.
     """
-    if isinstance(val, list):
-        return val[0] if val else ""
-    return val
+    if "tls.record" not in tls_layer:
+        return []
+
+    rec = tls_layer["tls.record"]
+    if isinstance(rec, list):
+        return rec
+    elif isinstance(rec, dict):
+        return [rec]
+    else:
+        return []
 
 
-def load_tls_json(path="captura_tls.json"):
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-def extract_records(capture):
+def map_tls_type_and_description(rec: Dict[str, Any]) -> (str, str):
     """
-    Extrai uma linha por *registro TLS* dentro de cada frame.
-    Se um frame tiver 3 registros TLS, ele gera 3 linhas.
+    Mapeia o tipo TLS (Handshake, ChangeCipherSpec, ApplicationData, Alert) e
+    tenta gerar uma descrição mais amigável (ClientHello, ServerHello etc.).
     """
-    rows = []
+    content_type = rec.get("tls.record.content_type")
+    opaque_type = rec.get("tls.record.opaque_type")
 
-    for packet in capture:
-        layers = packet.get("_source", {}).get("layers", {})
+    # Em Application Data, o Wireshark usa 'opaque_type' = 23
+    ctype = content_type or opaque_type
 
-        frame = layers.get("frame", {})
-        frame_num = get_first(frame.get("frame.number", ""))
-        frame_len = get_first(frame.get("frame.len", ""))
-        timestamp = get_first(frame.get("frame.time_epoch", ""))
+    ctype_map = {
+        "20": "ChangeCipherSpec",
+        "21": "Alert",
+        "22": "Handshake",
+        "23": "ApplicationData",
+    }
 
-        tcp_info = layers.get("tcp", {})
-        src_port = get_first(tcp_info.get("tcp.srcport", ""))
-        dst_port = get_first(tcp_info.get("tcp.dstport", ""))
+    handshake_type_map = {
+        "0": "HelloRequest",
+        "1": "ClientHello",
+        "2": "ServerHello",
+        "11": "Certificate",
+        "12": "ServerKeyExchange",
+        "13": "CertificateRequest",
+        "14": "ServerHelloDone",
+        "16": "ClientKeyExchange",
+        "20": "Finished",
+    }
 
-        tls_info = layers.get("tls")
-        if not tls_info:
-            # não há TLS nesse frame; ainda podemos registrar só para contexto se quisermos
-            continue
+    tls_type = ""
+    description = ""
 
-        recs = tls_info.get("tls.record")
-        if not recs:
-            continue
+    if ctype and ctype in ctype_map:
+        tls_type = ctype_map[ctype]
+    else:
+        tls_type = ""
 
-        # tls.record pode ser dict (1 só) ou lista (vários)
-        if isinstance(recs, dict):
-            recs = [recs]
+    # Se for handshake, tentar detalhar
+    if tls_type == "Handshake" and "tls.handshake" in rec:
+        hs = rec["tls.handshake"]
+        hs_type = hs.get("tls.handshake.type")
+        if hs_type and hs_type in handshake_type_map:
+            description = handshake_type_map[hs_type]
+        else:
+            description = "Handshake"
+    elif tls_type == "ChangeCipherSpec":
+        description = "ChangeCipherSpec"
+    elif tls_type == "ApplicationData":
+        description = "Application Data"
+    elif tls_type == "Alert":
+        description = "Alert"
 
-        for idx, rec in enumerate(recs):
-            # Tipo do registro TLS (Handshake, Application Data, etc.)
-            record_type_num = get_first(rec.get("tls.record.content_type", ""))
-            tls_type = TLS_TYPE.get(record_type_num, record_type_num)
-
-            record_len = get_first(rec.get("tls.record.length", ""))
-
-            # Handshake interno (se houver)
-            desc = ""
-            hs = rec.get("tls.handshake")
-            if isinstance(hs, list):
-                # vários handshakes no mesmo registro → pega o primeiro só pra resumo
-                hs = hs[0]
-            if isinstance(hs, dict):
-                hs_type_num = get_first(hs.get("tls.handshake.type", ""))
-                desc = HANDSHAKE_TYPE.get(hs_type_num, "")
-
-            # Se não tem handshake mas é Application Data, rotulamos como criptografado
-            if tls_type == "Application Data" and not desc:
-                desc = "Encrypted Application Data"
-
-            rows.append(
-                {
-                    "frame": int(frame_num) if str(frame_num).isdigit() else frame_num,
-                    "record_index": idx,
-                    "time": float(timestamp) if timestamp not in ("", None) else None,
-                    "len_bytes": int(frame_len) if str(frame_len).isdigit() else frame_len,
-                    "src_port": src_port,
-                    "dst_port": dst_port,
-                    "tls_type": tls_type,
-                    "tls_record_len": record_len,
-                    "description": desc,
-                }
-            )
-
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values(by=["frame", "record_index"])
-    return df
-
-
-def aggregate_by_frame(df_records: pd.DataFrame) -> pd.DataFrame:
-    """
-    Cria uma visão por *frame*:
-      - uma linha por frame
-      - coluna com resumo dos registros TLS presentes naquele frame
-    """
-    if df_records.empty:
-        return pd.DataFrame()
-
-    # Agrupar por frame
-    agg_rows = []
-    for frame, group in df_records.groupby("frame"):
-        time = group["time"].iloc[0]
-        len_bytes = group["len_bytes"].iloc[0]
-        src_port = group["src_port"].iloc[0]
-        dst_port = group["dst_port"].iloc[0]
-
-        # Resumo dos registros desse frame
-        summaries = []
-        for _, row in group.iterrows():
-            part = row["tls_type"]
-            if row["description"]:
-                part += f" ({row['description']})"
-            summaries.append(part)
-
-        summary = " | ".join(summaries)
-
-        agg_rows.append(
-            {
-                "frame": frame,
-                "time": time,
-                "len_bytes": len_bytes,
-                "src_port": src_port,
-                "dst_port": dst_port,
-                "tls_summary": summary,
-            }
-        )
-
-    df_frames = pd.DataFrame(agg_rows).sort_values(by="frame")
-    return df_frames
+    return tls_type, description
 
 
 def main():
-    capture = load_tls_json("captura_tls.json")
+    captura_path = Path(CAPTURA_FILE)
+    packets = load_packets(captura_path)
 
-    # 1) Uma linha por registro TLS
-    df_records = extract_records(capture)
+    record_rows = []  # linhas por record TLS
+    frame_rows = []   # linhas por frame
+
+    for pkt in packets:
+        layers = pkt.get("_source", {}).get("layers", {})
+        frame = layers.get("frame", {})
+        tcp = layers.get("tcp", {})
+        tls = layers.get("tls")
+
+        # Só nos interessam frames que têm camada TLS
+        if tls is None:
+            continue
+
+        try:
+            frame_no = int(frame.get("frame.number", "0"))
+            frame_time = float(frame.get("frame.time_epoch", "0.0"))
+            frame_len = int(frame.get("frame.len", "0"))
+        except ValueError:
+            # Se não conseguir converter, pula
+            continue
+
+        src_port = tcp.get("tcp.srcport")
+        dst_port = tcp.get("tcp.dstport")
+
+        # Normalizar records
+        records = normalize_tls_records(tls)
+
+        # Resumo para o frame (usamos o primeiro record para dar nome)
+        frame_summary = ""
+        if records:
+            tls_type0, desc0 = map_tls_type_and_description(records[0])
+            if tls_type0:
+                if desc0:
+                    frame_summary = f"{tls_type0} ({desc0})"
+                else:
+                    frame_summary = tls_type0
+            else:
+                frame_summary = "TLS record"
+        else:
+            frame_summary = "TLS (sem records)"
+
+        frame_rows.append({
+            "frame": frame_no,
+            "time": frame_time,
+            "len_bytes": frame_len,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "tls_summary": frame_summary,
+        })
+
+        # Agora, uma linha por record dentro do frame
+        for idx, rec in enumerate(records):
+            tls_type, desc = map_tls_type_and_description(rec)
+            rec_len_str = rec.get("tls.record.length") or rec.get("tls.record.len") or ""
+            try:
+                rec_len = int(rec_len_str) if rec_len_str != "" else ""
+            except ValueError:
+                rec_len = rec_len_str
+
+            record_rows.append({
+                "frame": frame_no,
+                "record_index": idx,
+                "time": frame_time,
+                "len_bytes": frame_len,
+                "src_port": src_port,
+                "dst_port": dst_port,
+                "tls_type": tls_type,
+                "tls_record_len": rec_len,
+                "description": desc,
+            })
+
+    # Ordenar por frame e índice de record
+    record_rows.sort(key=lambda r: (r["frame"], r["record_index"]))
+    frame_rows.sort(key=lambda r: r["frame"])
+
+    # Impressão amigável no terminal
     print("\n===== REGISTROS TLS (uma linha por record) =====\n")
-    if df_records.empty:
-        print("Nenhum registro TLS encontrado.")
+    if record_rows:
+        header = ["frame", "record_index", "time", "len_bytes", "src_port", "dst_port",
+                  "tls_type", "tls_record_len", "description"]
+        print(f"{'frame':>6} {'record_index':>12} {'time':>12} {'len_bytes':>10} {'src_port':>8} {'dst_port':>8} {'tls_type':>12} {'tls_record_len':>14} description")
+        for r in record_rows:
+            print(f"{r['frame']:6} {r['record_index']:12} {r['time']:12.6e} {r['len_bytes']:10} "
+                  f"{str(r['src_port']):>8} {str(r['dst_port']):>8} {r['tls_type']:>12} "
+                  f"{str(r['tls_record_len']):>14} {r['description']}")
     else:
-        print(df_records.to_string(index=False))
-        df_records.to_csv("tls_records_parsed.csv", index=False)
-        print("\nArquivo salvo: tls_records_parsed.csv")
+        print("Nenhum record TLS encontrado.")
 
-    # 2) Uma linha por frame, com resumo
-    df_frames = aggregate_by_frame(df_records)
+    # Salvar CSV de records
+    with open(TLS_RECORDS_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "frame",
+                "record_index",
+                "time",
+                "len_bytes",
+                "src_port",
+                "dst_port",
+                "tls_type",
+                "tls_record_len",
+                "description",
+            ],
+        )
+        writer.writeheader()
+        for r in record_rows:
+            writer.writerow(r)
+
+    print(f"\nArquivo salvo: {TLS_RECORDS_CSV}")
+
+    # Impressão amigável dos frames
     print("\n===== FRAMES TLS (uma linha por frame) =====\n")
-    if df_frames.empty:
-        print("Nenhum frame TLS agregado.")
+    if frame_rows:
+        print(f"{'frame':>6} {'time':>12} {'len_bytes':>10} {'src_port':>8} {'dst_port':>8} tls_summary")
+        for r in frame_rows:
+            print(f"{r['frame']:6} {r['time']:12.6e} {r['len_bytes']:10} "
+                  f"{str(r['src_port']):>8} {str(r['dst_port']):>8} {r['tls_summary']}")
     else:
-        print(df_frames.to_string(index=False))
-        df_frames.to_csv("tls_frames_parsed.csv", index=False)
-        print("\nArquivo salvo: tls_frames_parsed.csv")
+        print("Nenhum frame TLS encontrado.")
+
+    # Salvar CSV de frames
+    with open(TLS_FRAMES_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["frame", "time", "len_bytes", "src_port", "dst_port", "tls_summary"],
+        )
+        writer.writeheader()
+        for r in frame_rows:
+            writer.writerow(r)
+
+    print(f"\nArquivo salvo: {TLS_FRAMES_CSV}")
 
 
 if __name__ == "__main__":
